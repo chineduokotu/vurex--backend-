@@ -64,7 +64,25 @@ def send_otp_email(email, code):
             print(f"[OTP] Emailed code {code} to {email} via SendGrid")
             return True
         except Exception as e:
-            print(f"[OTP] SendGrid failed, falling back to console: {e}")
+            print(f"[OTP] SendGrid failed: {e}")
+
+    # Check if Django SMTP (e.g. Gmail) is configured
+    email_user = getattr(settings, "EMAIL_HOST_USER", "")
+    email_password = getattr(settings, "EMAIL_HOST_PASSWORD", "")
+    if email_user and email_password:
+        try:
+            from django.core.mail import send_mail
+            send_mail(
+                subject=subject,
+                message=body,
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", email_user),
+                recipient_list=[email],
+                fail_silently=False,
+            )
+            print(f"[OTP] Emailed code {code} to {email} via Django SMTP ({email_user})")
+            return True
+        except Exception as e:
+            print(f"[OTP] Django SMTP sending failed: {e}")
             
     # Fallback to console printing (always do this in dev or if not configured)
     print("\n" + "="*50)

@@ -22,7 +22,25 @@ def send_otp_email(email, code):
     subject = f"Your Vurex Verification Code: {code}"
     body = f"Hello,\n\nYour security verification code for Vurex Escrow is: {code}\n\nThis code will expire in 5 minutes.\n\nBest regards,\nThe Vurex Team"
     
-    # Check if Brevo key is configured (Preferred)
+    # Check if Django SMTP (e.g. Gmail App Password) is configured (Highest Priority)
+    email_user = getattr(settings, "EMAIL_HOST_USER", "")
+    email_password = getattr(settings, "EMAIL_HOST_PASSWORD", "")
+    if email_user and email_password:
+        try:
+            from django.core.mail import send_mail
+            send_mail(
+                subject=subject,
+                message=body,
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", email_user),
+                recipient_list=[email],
+                fail_silently=False,
+            )
+            print(f"[OTP] Emailed code {code} to {email} via Django SMTP ({email_user})")
+            return True
+        except Exception as e:
+            print(f"[OTP] Django SMTP sending failed: {e}")
+
+    # Check if Brevo key is configured
     brevo_key = getattr(settings, "BREVO_API_KEY", "")
     sender_email = getattr(settings, "BREVO_SENDER_EMAIL", "noreply@vurex.io")
     if brevo_key and not brevo_key.startswith("your_") and brevo_key != "":
@@ -54,7 +72,7 @@ def send_otp_email(email, code):
             from sendgrid import SendGridAPIClient
             from sendgrid.helpers.mail import Mail
             message = Mail(
-                from_email='noreply@vurex.io',  # In production, this must be a verified SendGrid sender
+                from_email='noreply@vurex.io',
                 to_emails=email,
                 subject=subject,
                 plain_text_content=body
@@ -65,24 +83,6 @@ def send_otp_email(email, code):
             return True
         except Exception as e:
             print(f"[OTP] SendGrid failed: {e}")
-
-    # Check if Django SMTP (e.g. Gmail) is configured
-    email_user = getattr(settings, "EMAIL_HOST_USER", "")
-    email_password = getattr(settings, "EMAIL_HOST_PASSWORD", "")
-    if email_user and email_password:
-        try:
-            from django.core.mail import send_mail
-            send_mail(
-                subject=subject,
-                message=body,
-                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", email_user),
-                recipient_list=[email],
-                fail_silently=False,
-            )
-            print(f"[OTP] Emailed code {code} to {email} via Django SMTP ({email_user})")
-            return True
-        except Exception as e:
-            print(f"[OTP] Django SMTP sending failed: {e}")
             
     # Fallback to console printing (always do this in dev or if not configured)
     print("\n" + "="*50)

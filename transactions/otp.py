@@ -24,6 +24,7 @@ def send_otp_email(email, code):
     
     # Check if Brevo key is configured (Preferred)
     brevo_key = getattr(settings, "BREVO_API_KEY", "")
+    sender_email = getattr(settings, "BREVO_SENDER_EMAIL", "noreply@vurex.io")
     if brevo_key and not brevo_key.startswith("your_") and brevo_key != "":
         try:
             import requests
@@ -32,7 +33,7 @@ def send_otp_email(email, code):
                 "Content-Type": "application/json",
             }
             payload = {
-                "sender": {"name": "Vurex Escrow", "email": "noreply@vurex.io"},
+                "sender": {"name": "Vurex Escrow", "email": sender_email},
                 "to": [{"email": email}],
                 "subject": subject,
                 "textContent": body,

@@ -117,3 +117,6 @@ CORS_ALLOWED_ORIGINS = config(
 PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
 PAYSTACK_BASE_URL = "https://api.paystack.co"
 SENDGRID_API_KEY = config("SENDGRID_API_KEY", default="")
+BREVO_API_KEY = config("BREVO_API_KEY", default="")
+BREVO_SENDER_EMAIL = config("BREVO_SENDER_EMAIL", default="noreply@vurex.io")
+

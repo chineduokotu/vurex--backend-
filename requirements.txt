@@ -8,3 +8,6 @@ requests>=2.31,<3.0
 djangorestframework-simplejwt>=5.3,<6.0
 sendgrid>=6.11,<7.0
 cloudinary>=1.39,<2.0
+gunicorn>=21.2.0,<23.0
+whitenoise>=6.6.0,<7.0
+

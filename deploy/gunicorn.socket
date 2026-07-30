@@ -1,0 +1,8 @@
+[Unit]
+Description=gunicorn socket for Vurex Django server
+
+[Socket]
+ListenStream=/run/gunicorn.sock
+
+[Install]
+WantedBy=sockets.target

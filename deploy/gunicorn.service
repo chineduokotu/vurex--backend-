@@ -1,0 +1,17 @@
+[Unit]
+Description=gunicorn daemon for Django Vurex Backend
+Requires=gunicorn.socket
+After=network.target
+
+[Service]
+User=ubuntu
+Group=www-data
+WorkingDirectory=/var/www/vurex-server
+ExecStart=/var/www/vurex-server/venv/bin/gunicorn \
+          --access-logfile - \
+          --workers 3 \
+          --bind unix:/run/gunicorn.sock \
+          vurex.wsgi:application
+
+[Install]
+WantedBy=multi-user.target

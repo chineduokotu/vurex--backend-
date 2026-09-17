@@ -29,6 +29,9 @@ class User(models.Model):
     full_name = models.CharField(max_length=100)
     email = models.EmailField(max_length=150, unique=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
+    phone_verified_at = models.DateTimeField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    auth_version = models.PositiveIntegerField(default=0)
     password_hash = models.CharField(max_length=255)
     role = models.CharField(max_length=20, choices=UserRole.choices)
     subaccount_code = models.CharField(max_length=100, blank=True, null=True)
@@ -36,6 +39,12 @@ class User(models.Model):
 
     class Meta:
         db_table = "users"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["phone"], condition=models.Q(phone_verified_at__isnull=False),
+                name="unique_verified_user_phone",
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         try:
@@ -129,7 +138,7 @@ class OTPCode(models.Model):
         return timezone.now() > self.expires_at
 
     def __str__(self):
-        return f"{self.email} - {self.code}"
+        return f"Legacy email challenge {self.id}"
 
 
 class Dispute(models.Model):

@@ -6,15 +6,13 @@ from django.core.files.storage import default_storage
 from django.db import transaction as db_transaction
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-from django.contrib.auth.hashers import check_password
+from django.contrib.auth.hashers import make_password
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken
 
 from . import paystack
-from .models import Dispute, DisputeOutcome, Transaction, TransactionStatus, User, UserRole, OTPCode
-from .otp import create_and_send_otp
+from .models import Dispute, DisputeOutcome, Transaction, TransactionStatus, User, UserRole
 from .serializers import (
     ConfirmDeliverySerializer,
     DisputeTransactionSerializer,
@@ -23,13 +21,8 @@ from .serializers import (
     RegisterSubaccountSerializer,
     ResolveDisputeSerializer,
     UserSerializer,
-    UserRegisterSerializer,
-    UserLoginSerializer,
-    UserUpdatePhoneSerializer,
     TransactionCreateSerializer,
     TransactionSerializer,
-    OTPRequestSerializer,
-    OTPVerifySerializer,
 )
 
 
@@ -37,13 +30,6 @@ def _serializer_errors(serializer):
     return Response({"error": serializer.errors}, status=400)
 
 
-def get_tokens_for_user(user):
-    refresh = RefreshToken.for_user(user)
-    return {
-        "refresh": str(refresh),
-        "access": str(refresh.access_token),
-        "user": UserSerializer(user).data,
-    }
 
 
 @csrf_exempt
@@ -432,64 +418,10 @@ def resolve_dispute(request):
     )
 
 
-@csrf_exempt
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def register_user(request):
-    serializer = UserRegisterSerializer(data=request.data)
-    if not serializer.is_valid():
-        return _serializer_errors(serializer)
-
-    data = serializer.validated_data
-    user = User.objects.create(
-        full_name=data["full_name"],
-        email=data["email"],
-        password_hash=data["password"],
-        role=data["role"],
-    )
-
-    return Response(UserSerializer(user).data)
 
 
-@csrf_exempt
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def login_user(request):
-    serializer = UserLoginSerializer(data=request.data)
-    if not serializer.is_valid():
-        return _serializer_errors(serializer)
-
-    data = serializer.validated_data
-    try:
-        user = User.objects.get(email=data["email"])
-    except User.DoesNotExist:
-        return Response({"error": "Invalid email or password"}, status=400)
-
-    if not check_password(data["password"], user.password_hash):
-        return Response({"error": "Invalid email or password"}, status=400)
-
-    return Response(get_tokens_for_user(user))
 
 
-@csrf_exempt
-@api_view(["POST"])
-def update_phone(request):
-    serializer = UserUpdatePhoneSerializer(data=request.data)
-    if not serializer.is_valid():
-        return _serializer_errors(serializer)
-
-    data = serializer.validated_data
-    try:
-        user = User.objects.get(id=data["user_id"])
-    except User.DoesNotExist:
-        return Response({"error": "User not found"}, status=404)
-
-    user.phone = data["phone"]
-    user.save(update_fields=["phone"])
-
-    return Response(UserSerializer(user).data)
 
 
 @csrf_exempt
@@ -535,7 +467,7 @@ def create_transaction(request):
         defaults={
             "full_name": buyer_email.split("@")[0].capitalize(),
             "role": UserRole.BUYER,
-            "password_hash": "defaultpassword123",
+            "password_hash": make_password(None),
         },
     )
 
@@ -573,56 +505,8 @@ def get_transaction(request, id):
     return Response(TransactionSerializer(tx).data)
 
 
-@csrf_exempt
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def request_otp(request):
-    serializer = OTPRequestSerializer(data=request.data)
-    if not serializer.is_valid():
-        return _serializer_errors(serializer)
-
-    email = serializer.validated_data["email"]
-    try:
-        user = User.objects.get(email=email)
-    except User.DoesNotExist:
-        return Response({"error": "User with this email does not exist"}, status=404)
-
-    create_and_send_otp(email)
-    return Response({"status": "otp_sent", "email": email})
 
 
-@csrf_exempt
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def verify_otp(request):
-    serializer = OTPVerifySerializer(data=request.data)
-    if not serializer.is_valid():
-        return _serializer_errors(serializer)
-
-    email = serializer.validated_data["email"]
-    code = serializer.validated_data["code"]
-
-    otp_record = OTPCode.objects.filter(email=email).order_by("-created_at").first()
-    if not otp_record:
-        return Response({"error": "No OTP request found for this email"}, status=400)
-
-    if otp_record.is_expired():
-        return Response({"error": "OTP code has expired"}, status=400)
-
-    if otp_record.code != code:
-        return Response({"error": "Invalid OTP code"}, status=400)
-
-    otp_record.delete()
-
-    try:
-        user = User.objects.get(email=email)
-    except User.DoesNotExist:
-        return Response({"error": "User not found"}, status=404)
-
-    tokens = get_tokens_for_user(user)
-    return Response({**tokens, "status": "verified"})
 
 
 @csrf_exempt

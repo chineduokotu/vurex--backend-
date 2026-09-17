@@ -1,0 +1,22 @@
+[Unit]
+Description=Vurex Termii notification worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=www-data
+WorkingDirectory=/var/www/vurex-server
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/var/www/vurex-server/.env
+ExecStartPre=/var/www/vurex-server/venv/bin/python manage.py check --deploy --fail-level ERROR
+ExecStart=/var/www/vurex-server/venv/bin/python manage.py run_notifications
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

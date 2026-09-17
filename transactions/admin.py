@@ -5,6 +5,11 @@ from .models import Dispute, Transaction, User
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
+    readonly_fields = ("phone", "phone_verified_at", "auth_version")
+    exclude = ("password_hash",)
+
+    def has_add_permission(self, request):
+        return False
     list_display = ("id", "full_name", "email", "role", "subaccount_code", "created_at")
     list_filter = ("role", "created_at")
     search_fields = ("full_name", "email", "phone", "subaccount_code")

@@ -5,11 +5,6 @@ from . import views
 
 urlpatterns = [
     # ── Auth ──────────────────────────────────────────────────────────────
-    path("auth/register/", views.register_user, name="auth-register"),
-    path("auth/login/", views.login_user, name="auth-login"),
-    path("auth/update-phone/", views.update_phone, name="auth-update-phone"),
-    path("auth/request-otp/", views.request_otp, name="auth-request-otp"),
-    path("auth/verify-otp/", views.verify_otp, name="auth-verify-otp"),
 
     # ── Transactions (CRUD) ───────────────────────────────────────────────
     path("transactions/", views.list_transactions, name="list-transactions"),

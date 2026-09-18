@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError
 from django.contrib.auth.password_validation import validate_password
 from django.db import IntegrityError, transaction
 from django.middleware.csrf import get_token
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny
@@ -223,6 +224,29 @@ def retired_otp(request):
 
 # ─── KYC / Dojah Views ───────────────────────────────────────────────────────
 
+def kyc_api(methods):
+    """Decorator for KYC endpoints. Authenticated via JWT Bearer tokens; exempt from session CSRF."""
+    def decorator(view):
+        @csrf_exempt
+        @api_view(methods)
+        @authentication_classes([])
+        @permission_classes([AllowAny])
+        @wraps(view)
+        def wrapped(request, *args, **kwargs):
+            try:
+                if request.method not in ("GET", "HEAD", "OPTIONS"):
+                    if not isinstance(request.data, dict):
+                        raise IdentityError("invalid_request", "Send a JSON object with the required fields.")
+                return view(request, *args, **kwargs)
+            except IdentityError as exc:
+                payload = {"error": exc.message, "code": exc.code}
+                if exc.retry_after is not None:
+                    payload["retry_after"] = exc.retry_after
+                return Response(payload, status=exc.status)
+        return wrapped
+    return decorator
+
+
 def _require_authenticated_user(request):
     """Return the authenticated User or raise IdentityError. KYC requires a full JWT session."""
     from transactions.authentication import CustomJWTAuthentication
@@ -239,14 +263,14 @@ def _require_authenticated_user(request):
     raise IdentityError("sign_in_required", "Please sign in to verify your identity.", 401)
 
 
-@identity_api(["GET"])
+@kyc_api(["GET"])
 def kyc_status(request):
     """GET /api/me/kyc/status/ — Return the authenticated user's KYC status summary."""
     user = _require_authenticated_user(request)
     return Response(get_kyc_status(user))
 
 
-@identity_api(["POST"])
+@kyc_api(["POST"])
 def kyc_verify_nin(request):
     """POST /api/me/kyc/verify-nin/ — Submit NIN for Dojah verification.
 
@@ -276,7 +300,7 @@ def kyc_verify_nin(request):
     }, status=http_status)
 
 
-@identity_api(["POST"])
+@kyc_api(["POST"])
 def kyc_verify_bvn(request):
     """POST /api/me/kyc/verify-bvn/ — Submit BVN for Dojah verification.
 
@@ -304,3 +328,4 @@ def kyc_verify_bvn(request):
         "verified_at": record.verified_at.isoformat() if record.verified_at else None,
         "message": failure_messages.get(record.failure_reason, "") if record.status != "verified" else "BVN verified successfully.",
     }, status=http_status)
+

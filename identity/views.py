@@ -22,7 +22,10 @@ from .errors import IdentityError
 from .models import PhoneChallenge
 from .rate_limits import reserve_limits
 from .security import client_ip, session_binding, start_onboarding_session
-from .services import audit, challenge_data, own_challenge, request_challenge, verify_challenge
+from .services import (
+    audit, challenge_data, get_kyc_status, own_challenge, request_challenge,
+    submit_bvn_verification, submit_nin_verification, verify_challenge,
+)
 
 
 def identity_api(methods):
@@ -216,3 +219,88 @@ def verify_phone(request, challenge_id):
 def retired_otp(request):
     return Response({"error": "This verification flow has been replaced. Refresh the application and sign in.",
                      "code": "verification_flow_replaced"}, status=410)
+
+
+# ─── KYC / Dojah Views ───────────────────────────────────────────────────────
+
+def _require_authenticated_user(request):
+    """Return the authenticated User or raise IdentityError. KYC requires a full JWT session."""
+    from transactions.authentication import CustomJWTAuthentication
+    from rest_framework.exceptions import AuthenticationFailed
+    from rest_framework_simplejwt.exceptions import InvalidToken
+    try:
+        result = CustomJWTAuthentication().authenticate(request)
+        if result:
+            user, _ = result
+            if user.is_active:
+                return user
+    except (AuthenticationFailed, InvalidToken):
+        pass
+    raise IdentityError("sign_in_required", "Please sign in to verify your identity.", 401)
+
+
+@identity_api(["GET"])
+def kyc_status(request):
+    """GET /api/me/kyc/status/ — Return the authenticated user's KYC status summary."""
+    user = _require_authenticated_user(request)
+    return Response(get_kyc_status(user))
+
+
+@identity_api(["POST"])
+def kyc_verify_nin(request):
+    """POST /api/me/kyc/verify-nin/ — Submit NIN for Dojah verification.
+
+    Body: { "nin": "12345678901" }
+    """
+    user = _require_authenticated_user(request)
+    nin = request.data.get("nin", "")
+    record = submit_nin_verification(user, nin, request)
+    status_map = {
+        "verified": 200,
+        "requires_review": 202,
+        "failed": 422,
+        "rejected": 422,
+    }
+    http_status = status_map.get(record.status, 422)
+    failure_messages = {
+        "name_mismatch": "The name on your NIN does not match your account name. Please check your account name and try again.",
+        "name_partial_match": "Your identity is under review. You will be notified of the outcome.",
+        "nin_not_found": "This NIN was not found. Please check the number and try again.",
+        "nin_invalid_format": "The NIN format is not valid. Please enter all 11 digits.",
+    }
+    return Response({
+        "status": record.status,
+        "masked_id": record.masked_id,
+        "verified_at": record.verified_at.isoformat() if record.verified_at else None,
+        "message": failure_messages.get(record.failure_reason, "") if record.status != "verified" else "NIN verified successfully.",
+    }, status=http_status)
+
+
+@identity_api(["POST"])
+def kyc_verify_bvn(request):
+    """POST /api/me/kyc/verify-bvn/ — Submit BVN for Dojah verification.
+
+    Body: { "bvn": "12345678901" }
+    """
+    user = _require_authenticated_user(request)
+    bvn = request.data.get("bvn", "")
+    record = submit_bvn_verification(user, bvn, request)
+    status_map = {
+        "verified": 200,
+        "requires_review": 202,
+        "failed": 422,
+        "rejected": 422,
+    }
+    http_status = status_map.get(record.status, 422)
+    failure_messages = {
+        "name_mismatch": "The name on your BVN does not match your account name. Please check your account name and try again.",
+        "name_partial_match": "Your identity is under review. You will be notified of the outcome.",
+        "bvn_not_found": "This BVN was not found. Please check the number and try again.",
+        "bvn_invalid_format": "The BVN format is not valid. Please enter all 11 digits.",
+    }
+    return Response({
+        "status": record.status,
+        "masked_id": record.masked_id,
+        "verified_at": record.verified_at.isoformat() if record.verified_at else None,
+        "message": failure_messages.get(record.failure_reason, "") if record.status != "verified" else "BVN verified successfully.",
+    }, status=http_status)

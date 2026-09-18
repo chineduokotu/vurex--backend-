@@ -14,4 +14,8 @@ urlpatterns = [
     path("auth/request-otp/", views.retired_otp),
     path("auth/verify-otp/", views.retired_otp),
     path("auth/update-phone/", views.retired_otp),
+    # KYC / Dojah verification endpoints
+    path("me/kyc/status/", views.kyc_status, name="kyc-status"),
+    path("me/kyc/verify-nin/", views.kyc_verify_nin, name="kyc-verify-nin"),
+    path("me/kyc/verify-bvn/", views.kyc_verify_bvn, name="kyc-verify-bvn"),
 ]

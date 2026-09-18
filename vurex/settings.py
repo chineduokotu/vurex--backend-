@@ -191,6 +191,20 @@ OTP_SENDS_PER_DAY = config("OTP_SENDS_PER_DAY", default=10, cast=int)
 OTP_IP_SENDS_PER_HOUR = config("OTP_IP_SENDS_PER_HOUR", default=20, cast=int)
 OTP_VERIFY_ATTEMPTS_PER_HOUR = config("OTP_VERIFY_ATTEMPTS_PER_HOUR", default=20, cast=int)
 OTP_VERIFY_IP_ATTEMPTS_PER_HOUR = config("OTP_VERIFY_IP_ATTEMPTS_PER_HOUR", default=100, cast=int)
+# Dojah KYC Integration settings. Missing credentials disable all KYC verification.
+DOJAH_APP_ID = config("DOJAH_APP_ID", default="")
+DOJAH_SECRET_KEY = config("DOJAH_SECRET_KEY", default="")
+DOJAH_BASE_URL = config("DOJAH_BASE_URL", default="https://sandbox.dojah.io")
+DOJAH_WEBHOOK_SECRET = config("DOJAH_WEBHOOK_SECRET", default="")
+DOJAH_HASH_SALT = config("DOJAH_HASH_SALT", default="")
+DOJAH_CONNECT_TIMEOUT_SECONDS = config("DOJAH_CONNECT_TIMEOUT_SECONDS", default=5, cast=float)
+DOJAH_READ_TIMEOUT_SECONDS = config("DOJAH_READ_TIMEOUT_SECONDS", default=20, cast=float)
+# KYC rate limits
+KYC_SUBMISSIONS_PER_USER_PER_DAY = config("KYC_SUBMISSIONS_PER_USER_PER_DAY", default=3, cast=int)
+KYC_SUBMISSIONS_PER_IP_PER_HOUR = config("KYC_SUBMISSIONS_PER_IP_PER_HOUR", default=10, cast=int)
+# Minimum fuzzy name match score (0.0–1.0) to auto-approve. Below this goes to requires_review.
+KYC_NAME_MATCH_THRESHOLD = config("KYC_NAME_MATCH_THRESHOLD", default=0.85, cast=float)
+
 NOTIFICATION_MAX_ATTEMPTS = 3
 NOTIFICATION_LEASE_SECONDS = 120
 PUBLIC_API_BASE_URL = config("PUBLIC_API_BASE_URL", default="")

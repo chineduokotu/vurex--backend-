@@ -237,12 +237,16 @@ def kyc_api(methods):
                 if request.method not in ("GET", "HEAD", "OPTIONS"):
                     if not isinstance(request.data, dict):
                         raise IdentityError("invalid_request", "Send a JSON object with the required fields.")
-                return view(request, *args, **kwargs)
+                response = view(request, *args, **kwargs)
             except IdentityError as exc:
                 payload = {"error": exc.message, "code": exc.code}
                 if exc.retry_after is not None:
                     payload["retry_after"] = exc.retry_after
-                return Response(payload, status=exc.status)
+                response = Response(payload, status=exc.status)
+                if exc.retry_after is not None:
+                    response["Retry-After"] = str(exc.retry_after)
+            response["Cache-Control"] = "no-store"
+            return response
         return wrapped
     return decorator
 
@@ -292,12 +296,17 @@ def kyc_verify_nin(request):
         "nin_not_found": "This NIN was not found. Please check the number and try again.",
         "nin_invalid_format": "The NIN format is not valid. Please enter all 11 digits.",
     }
-    return Response({
+    message = failure_messages.get(record.failure_reason, "") if record.status != "verified" else "NIN verified successfully."
+    payload = {
         "status": record.status,
         "masked_id": record.masked_id,
         "verified_at": record.verified_at.isoformat() if record.verified_at else None,
-        "message": failure_messages.get(record.failure_reason, "") if record.status != "verified" else "NIN verified successfully.",
-    }, status=http_status)
+        "message": message,
+    }
+    if record.status in ("failed", "rejected"):
+        payload["error"] = message
+        payload["code"] = record.failure_reason or record.status
+    return Response(payload, status=http_status)
 
 
 @kyc_api(["POST"])
@@ -322,10 +331,36 @@ def kyc_verify_bvn(request):
         "bvn_not_found": "This BVN was not found. Please check the number and try again.",
         "bvn_invalid_format": "The BVN format is not valid. Please enter all 11 digits.",
     }
-    return Response({
+    message = failure_messages.get(record.failure_reason, "") if record.status != "verified" else "BVN verified successfully."
+    payload = {
         "status": record.status,
         "masked_id": record.masked_id,
         "verified_at": record.verified_at.isoformat() if record.verified_at else None,
-        "message": failure_messages.get(record.failure_reason, "") if record.status != "verified" else "BVN verified successfully.",
-    }, status=http_status)
+        "message": message,
+    }
+    if record.status in ("failed", "rejected"):
+        payload["error"] = message
+        payload["code"] = record.failure_reason or record.status
+    return Response(payload, status=http_status)
 
+
+@csrf_exempt
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def dojah_webhook(request):
+    """POST /api/webhooks/dojah/ — Handle Dojah asynchronous webhook callbacks."""
+    signature = request.headers.get("x-dojah-signature") or request.headers.get("x-dojah-signature-v2")
+    from integrations.dojah import verify_webhook_signature
+    if not verify_webhook_signature(request.body, signature):
+        return Response({"error": "Invalid webhook signature", "code": "invalid_signature"}, status=401)
+
+    try:
+        payload = request.data if isinstance(request.data, dict) else {}
+    except Exception:
+        return Response({"error": "Invalid JSON payload", "code": "invalid_payload"}, status=400)
+
+    # Audit log the webhook receipt safely without logging customer identity or PII
+    event_type = payload.get("event") or payload.get("type") or "unknown"
+    audit("kyc.webhook_received", str(event_type)[:64], None, subject_id=str(payload.get("id", ""))[:64], request=request)
+    return Response({"status": "received"})

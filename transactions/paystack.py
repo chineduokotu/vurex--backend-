@@ -1,6 +1,5 @@
 import hmac
 import hashlib
-import random
 from decimal import Decimal, ROUND_HALF_UP
 
 import requests
@@ -11,13 +10,12 @@ class PaystackError(Exception):
     pass
 
 
-def is_mock():
-    key = settings.PAYSTACK_SECRET_KEY
-    return not key or "xxxx" in key or key.startswith("sk_test_xxxx")
-
-
 def _headers():
-    if not settings.PAYSTACK_SECRET_KEY:
+    if (
+        not settings.PAYSTACK_SECRET_KEY
+        or "xxxx" in settings.PAYSTACK_SECRET_KEY
+        or (not settings.DEBUG and settings.PAYSTACK_SECRET_KEY.startswith("sk_test_"))
+    ):
         raise PaystackError("PAYSTACK_SECRET_KEY is not configured")
     return {
         "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
@@ -47,9 +45,6 @@ def naira_to_kobo(amount):
 
 
 def create_subaccount(business_name, bank_code, account_number):
-    if is_mock():
-        code = "ACCT_" + "".join(random.choices("0123456789ABCDEF", k=8))
-        return {"subaccount_code": code}
     return _post(
         "/subaccount",
         {
@@ -62,16 +57,16 @@ def create_subaccount(business_name, bank_code, account_number):
 
 
 def initialize_transaction(transaction):
-    if is_mock():
-        return {
-            "authorization_url": f"https://checkout.paystack.com/{transaction.id}",
-            "reference": str(transaction.id),
-        }
+    total_due = (
+        Decimal(transaction.amount)
+        + Decimal(transaction.escrow_fee or 0)
+        + Decimal(transaction.delivery_fee or 0)
+    )
     return _post(
         "/transaction/initialize",
         {
             "email": transaction.buyer.email,
-            "amount": naira_to_kobo(transaction.amount),
+            "amount": naira_to_kobo(total_due),
             "reference": str(transaction.id),
             "metadata": {
                 "transaction_id": str(transaction.id),
@@ -82,11 +77,6 @@ def initialize_transaction(transaction):
 
 
 def create_transfer(amount, recipient, reason):
-    if is_mock():
-        return {
-            "transfer_code": "TRF_" + "".join(random.choices("0123456789ABCDEF", k=8)),
-            "status": "success",
-        }
     return _post(
         "/transfer",
         {
@@ -99,10 +89,6 @@ def create_transfer(amount, recipient, reason):
 
 
 def create_refund(payment_ref, amount):
-    if is_mock():
-        return {
-            "status": "processed"
-        }
     return _post(
         "/refund",
         {
@@ -113,10 +99,13 @@ def create_refund(payment_ref, amount):
 
 
 def verify_webhook_signature(request):
-    if is_mock():
-        return True
     paystack_signature = request.headers.get("x-paystack-signature")
-    if not paystack_signature or not settings.PAYSTACK_SECRET_KEY:
+    if (
+        not paystack_signature
+        or not settings.PAYSTACK_SECRET_KEY
+        or "xxxx" in settings.PAYSTACK_SECRET_KEY
+        or (not settings.DEBUG and settings.PAYSTACK_SECRET_KEY.startswith("sk_test_"))
+    ):
         return False
     raw_body = getattr(request, "body", None)
     if raw_body is None and hasattr(request, "_request"):

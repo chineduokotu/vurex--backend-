@@ -88,22 +88,9 @@ def accept_dispute(request):
     if not dispute:
         return Response({"error": "Open dispute not found"}, status=404)
 
-    # Release funds to buyer
-    with db_transaction.atomic():
-        # Typically here we would trigger a Paystack refund to the buyer
-        # but since we don't have buyer refund automated logic, we just update state
-        dispute.outcome = DisputeOutcome.RELEASE_BUYER
-        dispute.resolved_at = timezone.now()
-        dispute.save(update_fields=["outcome", "resolved_at"])
-        escrow.status = TransactionStatus.RESOLVED
-        escrow.resolved_at = timezone.now()
-        escrow.save(update_fields=["status", "resolved_at", "updated_at"])
-
     return Response(
-        {
-            "outcome": DisputeOutcome.RELEASE_BUYER,
-            "status": "resolved",
-        }
+        {"error": "Accepting disputes is unavailable until refunds can be processed. Please contact support."},
+        status=503,
     )
 
 
@@ -202,13 +189,7 @@ def verify_payment(request):
     if not escrow:
         return Response({"error": "Transaction not found"}, status=404)
         
-    # In local test environments webhooks might not reach the server, so we force update.
-    if escrow.status in [TransactionStatus.CREATED, "initialized"]:
-        escrow.status = TransactionStatus.FUNDED
-        escrow.updated_at = timezone.now()
-        escrow.funded_at = timezone.now()
-        escrow.save(update_fields=["status", "updated_at", "funded_at"])
-        
+    # Funding is established by the signed Paystack webhook, never by a client check.
     return Response({"status": "ok", "transaction_status": escrow.status})
 
 

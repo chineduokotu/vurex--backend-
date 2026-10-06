@@ -97,6 +97,8 @@ def _configuration() -> _Configuration:
     secret_key = _setting_text("DOJAH_SECRET_KEY")
     if any(c.isspace() for c in secret_key) or any(c.isspace() for c in app_id):
         raise DojahError("configuration_invalid_dojah_credentials")
+    if app_id.startswith(("test_pk_", "prod_pk_", "pk_")):
+        raise DojahError("configuration_invalid_dojah_app_id")
     base_url = _setting_text("DOJAH_BASE_URL")
     try:
         parsed = urlsplit(base_url)
@@ -117,6 +119,9 @@ def _configuration() -> _Configuration:
         raise DojahError("configuration_invalid_dojah_base_url") from None
     if not valid_url:
         raise DojahError("configuration_invalid_dojah_base_url")
+    allow_sandbox = getattr(settings, "DOJAH_ALLOW_SANDBOX", False)
+    if not settings.DEBUG and not allow_sandbox and hostname == "sandbox.dojah.io":
+        raise DojahError("configuration_requires_production_dojah_url")
     base_url = "https://" + parsed.netloc.lower()
     return _Configuration(
         app_id=app_id,
@@ -194,8 +199,10 @@ class DojahClient:
                     ambiguous=True,
                     retry_after=_retry_after(response),
                 )
-            if status >= 500 or status == 408:
+            if status >= 500 or status in (408, 424):
                 raise DojahError("provider_unavailable", retryable=True)
+            if status == 402:
+                raise DojahError("provider_unavailable", retryable=False)
             if 400 <= status < 500:
                 # Parse error body for a user-intelligible reason.
                 try:
@@ -203,8 +210,12 @@ class DojahClient:
                     msg = body.get("error", {})
                     if isinstance(msg, dict):
                         msg = msg.get("message", "")
-                    if isinstance(msg, str) and "invalid" in msg.lower():
-                        raise DojahError("id_invalid_format")
+                    if isinstance(msg, str):
+                        lower_msg = msg.lower()
+                        if "not found" in lower_msg or "not exist" in lower_msg or "no record" in lower_msg:
+                            raise DojahError("id_not_found")
+                        if "invalid" in lower_msg:
+                            raise DojahError("id_invalid_format")
                 except (ValueError, AttributeError):
                     pass
                 raise DojahError("provider_request_rejected")
@@ -239,16 +250,26 @@ class DojahClient:
         entity = body.get("entity")
         if not isinstance(entity, dict):
             raise DojahError("provider_protocol_error", ambiguous=True)
-        first_name = _safe_str(entity.get("firstname") or entity.get("first_name"))
-        last_name = _safe_str(entity.get("surname") or entity.get("lastname") or entity.get("last_name"))
+        first_name = _safe_str(
+            entity.get("firstname") or entity.get("first_name") or entity.get("firstName")
+        )
+        last_name = _safe_str(
+            entity.get("surname") or entity.get("lastname") or entity.get("last_name") or entity.get("lastName")
+        )
         if not first_name and not last_name:
             raise DojahError("provider_protocol_error", ambiguous=True)
         return NINResult(
             first_name=first_name,
             last_name=last_name,
-            middle_name=_safe_str(entity.get("middlename") or entity.get("middle_name")),
-            date_of_birth=_safe_str(entity.get("birthdate") or entity.get("date_of_birth")),
-            phone=_safe_str(entity.get("phone") or entity.get("phone_number")),
+            middle_name=_safe_str(
+                entity.get("middlename") or entity.get("middle_name") or entity.get("middleName")
+            ),
+            date_of_birth=_safe_str(
+                entity.get("birthdate") or entity.get("date_of_birth") or entity.get("dateOfBirth") or entity.get("dob")
+            ),
+            phone=_safe_str(
+                entity.get("phone") or entity.get("phone_number") or entity.get("phoneNumber") or entity.get("mobile")
+            ),
             gender=_safe_str(entity.get("gender")),
         )
 
@@ -271,23 +292,33 @@ class DojahClient:
         entity = body.get("entity")
         if not isinstance(entity, dict):
             raise DojahError("provider_protocol_error", ambiguous=True)
-        first_name = _safe_str(entity.get("first_name") or entity.get("firstName"))
-        last_name = _safe_str(entity.get("last_name") or entity.get("lastName"))
+        first_name = _safe_str(
+            entity.get("first_name") or entity.get("firstname") or entity.get("firstName")
+        )
+        last_name = _safe_str(
+            entity.get("last_name") or entity.get("lastname") or entity.get("surname") or entity.get("lastName")
+        )
         if not first_name and not last_name:
             raise DojahError("provider_protocol_error", ambiguous=True)
         return BVNResult(
             first_name=first_name,
             last_name=last_name,
-            middle_name=_safe_str(entity.get("middle_name") or entity.get("middleName")),
-            date_of_birth=_safe_str(entity.get("date_of_birth") or entity.get("dateOfBirth")),
-            phone=_safe_str(entity.get("phone_number") or entity.get("phone")),
+            middle_name=_safe_str(
+                entity.get("middle_name") or entity.get("middlename") or entity.get("middleName")
+            ),
+            date_of_birth=_safe_str(
+                entity.get("date_of_birth") or entity.get("dateOfBirth") or entity.get("birthdate") or entity.get("dob")
+            ),
+            phone=_safe_str(
+                entity.get("phone_number1") or entity.get("phone_number") or entity.get("phoneNumber") or entity.get("phone") or entity.get("mobile")
+            ),
             bank_name=_safe_str(entity.get("bank_name", "")),
         )
 
 
 @sensitive_variables()
 def verify_webhook_signature(raw_body: bytes, signature: str | None) -> bool:
-    """Authenticate an incoming Dojah webhook payload using HMAC-SHA512.
+    """Authenticate an incoming Dojah webhook payload using HMAC-SHA256 (or HMAC-SHA512).
 
     Returns False (never raises) if the webhook secret is not configured or
     the signature is absent/invalid. Callers must return 401 on False.
@@ -300,11 +331,23 @@ def verify_webhook_signature(raw_body: bytes, signature: str | None) -> bool:
         or not isinstance(signature, str)
     ):
         return False
-    if not re.fullmatch(r"[0-9a-fA-F]{128}", signature):
-        return False
-    expected = hmac.new(webhook_secret.strip().encode("utf-8"), raw_body, hashlib.sha512).digest()
-    try:
-        supplied = bytes.fromhex(signature)
-    except ValueError:
-        return False
-    return hmac.compare_digest(expected, supplied)
+    signature = signature.strip().lower()
+    secret_bytes = webhook_secret.strip().encode("utf-8")
+
+    # Dojah standard webhook signature is HMAC-SHA256 (64 hex characters)
+    if re.fullmatch(r"[0-9a-f]{64}", signature):
+        expected = hmac.new(secret_bytes, raw_body, hashlib.sha256).hexdigest().lower()
+        if hmac.compare_digest(expected, signature):
+            return True
+        # Dojah v2 signature is SHA256 of the secret key alone
+        expected_v2 = hashlib.sha256(secret_bytes).hexdigest().lower()
+        if hmac.compare_digest(expected_v2, signature):
+            return True
+
+    # Legacy / SHA-512 fallback (128 hex characters)
+    if re.fullmatch(r"[0-9a-f]{128}", signature):
+        expected = hmac.new(secret_bytes, raw_body, hashlib.sha512).hexdigest().lower()
+        if hmac.compare_digest(expected, signature):
+            return True
+
+    return False

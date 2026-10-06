@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import math
 import re
 import unicodedata
@@ -11,7 +12,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from integrations.termii import TermiiClient, TermiiError, validate_configuration
-from integrations.dojah import DojahClient, DojahError
+from integrations.dojah import DojahClient, DojahError, validate_configuration as validate_dojah_configuration
 from notifications.services import enqueue_job, notify_phone_verified, reserve_sms_budget
 from transactions.models import User
 
@@ -19,6 +20,9 @@ from .errors import IdentityError
 from .models import AuditEvent, KYCVerification, PhoneChallenge
 from .rate_limits import reserve_limits
 from .security import client_ip, fingerprint, masked_phone, normalize_phone, require_recent_password, session_binding
+
+
+logger = logging.getLogger(__name__)
 
 
 def audit(action, outcome, user=None, subject_id="", request=None):
@@ -273,14 +277,21 @@ def _name_match_score(account_full_name: str, first_name: str, last_name: str, m
 
     Strategy:
       1. Normalise both sides (lowercase, strip accents, remove punctuation).
-      2. Build a sorted token set from the provider record.
-      3. For each token in the provider set, check if it appears in the account name tokens.
-      4. Score = matched tokens / total provider tokens.
-
-    This is intentionally simple and conservative: partial matches go to requires_review
-    rather than being auto-approved.
+      2. If both primary first and last name tokens from the provider are present in the account name,
+         confidence is high (1.0).
+      3. Otherwise, compute ratio of matched provider tokens to total provider tokens.
     """
     account_tokens = set(_normalise_name_part(account_full_name).split())
+    if not account_tokens:
+        return 0.0
+
+    first_tokens = set(_normalise_name_part(first_name).split())
+    last_tokens = set(_normalise_name_part(last_name).split())
+
+    # If both first and last name tokens exist in the account name, treat as a complete primary match.
+    if first_tokens and last_tokens and first_tokens.issubset(account_tokens) and last_tokens.issubset(account_tokens):
+        return 1.0
+
     provider_parts = [first_name, last_name]
     if middle_name:
         provider_parts.append(middle_name)
@@ -337,6 +348,54 @@ def _enforce_kyc_rate_limits(user, request) -> None:
     ])
 
 
+def _prepare_kyc_verification(user, verification_type, raw_id, request):
+    try:
+        validate_dojah_configuration()
+        id_hash = _hash_id_number(raw_id)
+    except DojahError as exc:
+        logger.warning("KYC configuration unavailable: %s", exc.code)
+        raise IdentityError("kyc_unavailable", "Identity verification is temporarily unavailable.", 503) from None
+    except IdentityError as exc:
+        logger.warning("KYC configuration unavailable: %s", exc.code)
+        raise
+
+    # Reserve one attempt per user/type before contacting the provider. The
+    # existing user row lock also serializes requests with different ID numbers.
+    with transaction.atomic():
+        User.objects.select_for_update().get(pk=user.pk)
+        _assert_kyc_not_already_verified(user, verification_type)
+        now = timezone.now()
+        attempts = KYCVerification.objects.filter(user=user, verification_type=verification_type)
+        # Mark stale pending requests older than 120 seconds as failed to prevent permanent lockout
+        stale_cutoff = now - timedelta(seconds=getattr(settings, "NOTIFICATION_LEASE_SECONDS", 120))
+        attempts.filter(status=KYCVerification.Status.PENDING, created_at__lt=stale_cutoff).update(
+            status=KYCVerification.Status.FAILED, failure_reason="timeout", updated_at=now
+        )
+        pending = attempts.filter(status=KYCVerification.Status.PENDING).exists()
+        if pending:
+            raise IdentityError("kyc_pending", "Your verification is still processing. Please check your KYC status.", 409)
+        review = attempts.filter(status=KYCVerification.Status.REQUIRES_REVIEW).order_by("-created_at").first()
+        if review:
+            return review, False
+        prior = attempts.filter(id_hash=id_hash).order_by("-created_at").first()
+        identity_failure = prior and (
+            prior.status == KYCVerification.Status.REJECTED
+            or prior.failure_reason in {f"{verification_type}_not_found", f"{verification_type}_invalid_format"}
+        )
+        if identity_failure and prior.created_at > timezone.now() - timedelta(hours=24):
+            retry_after = max(1, int((prior.created_at + timedelta(hours=24) - timezone.now()).total_seconds()))
+            raise IdentityError(
+                "kyc_recently_failed", "This ID was recently rejected. Please wait before trying again.",
+                429, retry_after,
+            )
+        _enforce_kyc_rate_limits(user, request)
+        record = KYCVerification.objects.create(
+            user=user, verification_type=verification_type, status=KYCVerification.Status.PENDING,
+            id_hash=id_hash, masked_id=_mask_id_number(raw_id),
+        )
+    return record, True
+
+
 def submit_nin_verification(user, nin: str, request) -> KYCVerification:
     """Verify a user's NIN via Dojah and persist a KYCVerification record.
 
@@ -358,40 +417,9 @@ def submit_nin_verification(user, nin: str, request) -> KYCVerification:
     if not isinstance(nin, str) or not re.fullmatch(r"[0-9]{11}", nin):
         raise IdentityError("invalid_nin", "Enter a valid 11-digit NIN.", 400)
 
-    _assert_kyc_not_already_verified(user, KYCVerification.VerificationType.NIN)
-    _enforce_kyc_rate_limits(user, request)
-
-    try:
-        validate_configuration()
-    except DojahError:
-        raise IdentityError("kyc_unavailable", "Identity verification is temporarily unavailable.", 503) from None
-
-    id_hash = _hash_id_number(nin)
-    masked_id = _mask_id_number(nin)
-
-    # Check for a prior attempt with this same NIN hash that already failed/rejected.
-    prior = KYCVerification.objects.filter(
-        user=user,
-        verification_type=KYCVerification.VerificationType.NIN,
-        id_hash=id_hash,
-    ).exclude(status__in=[KYCVerification.Status.PENDING]).first()
-    if prior and prior.status in (KYCVerification.Status.REJECTED, KYCVerification.Status.FAILED):
-        # Allow re-attempt only if last attempt was more than 24h ago.
-        if prior.created_at > timezone.now() - timedelta(hours=24):
-            raise IdentityError(
-                "kyc_recently_failed",
-                "This ID was recently rejected. Please wait 24 hours before trying again.",
-                429,
-            )
-
-    # Create a pending record before the API call.
-    record = KYCVerification.objects.create(
-        user=user,
-        verification_type=KYCVerification.VerificationType.NIN,
-        status=KYCVerification.Status.PENDING,
-        id_hash=id_hash,
-        masked_id=masked_id,
-    )
+    record, created = _prepare_kyc_verification(user, KYCVerification.VerificationType.NIN, nin, request)
+    if not created:
+        return record
     audit("kyc.nin_submitted", "pending", user, record.id, request)
 
     # Call Dojah — raw NIN leaves scope after this block.
@@ -410,11 +438,24 @@ def submit_nin_verification(user, nin: str, request) -> KYCVerification:
             record.save(update_fields=["status", "failure_reason", "updated_at"])
             audit("kyc.nin_result", "failed_invalid", user, record.id, request)
             raise IdentityError("invalid_nin", "The NIN format is not valid.", 422) from None
-        # Provider unavailable or ambiguous — leave record as pending, surface to user.
+        # Provider failure is not an identity rejection. Explicit retries remain
+        # subject to the submission quota, without the identity-failure cooldown.
         record.status = KYCVerification.Status.FAILED
         record.failure_reason = exc.code
         record.save(update_fields=["status", "failure_reason", "updated_at"])
         audit("kyc.nin_result", f"provider_error:{exc.code}", user, record.id, request)
+        logger.warning("KYC NIN provider unavailable: %s", exc.code)
+        raise IdentityError(
+            "kyc_unavailable",
+            "Identity verification is temporarily unavailable. Please try again later.",
+            503,
+        ) from None
+    except Exception as exc:
+        record.status = KYCVerification.Status.FAILED
+        record.failure_reason = "provider_error"
+        record.save(update_fields=["status", "failure_reason", "updated_at"])
+        audit("kyc.nin_result", "provider_error:unexpected", user, record.id, request)
+        logger.exception("Unexpected error during KYC NIN verification: %s", exc)
         raise IdentityError(
             "kyc_unavailable",
             "Identity verification is temporarily unavailable. Please try again later.",
@@ -456,37 +497,9 @@ def submit_bvn_verification(user, bvn: str, request) -> KYCVerification:
     if not isinstance(bvn, str) or not re.fullmatch(r"[0-9]{11}", bvn):
         raise IdentityError("invalid_bvn", "Enter a valid 11-digit BVN.", 400)
 
-    _assert_kyc_not_already_verified(user, KYCVerification.VerificationType.BVN)
-    _enforce_kyc_rate_limits(user, request)
-
-    try:
-        validate_configuration()
-    except DojahError:
-        raise IdentityError("kyc_unavailable", "Identity verification is temporarily unavailable.", 503) from None
-
-    id_hash = _hash_id_number(bvn)
-    masked_id = _mask_id_number(bvn)
-
-    prior = KYCVerification.objects.filter(
-        user=user,
-        verification_type=KYCVerification.VerificationType.BVN,
-        id_hash=id_hash,
-    ).exclude(status__in=[KYCVerification.Status.PENDING]).first()
-    if prior and prior.status in (KYCVerification.Status.REJECTED, KYCVerification.Status.FAILED):
-        if prior.created_at > timezone.now() - timedelta(hours=24):
-            raise IdentityError(
-                "kyc_recently_failed",
-                "This BVN was recently rejected. Please wait 24 hours before trying again.",
-                429,
-            )
-
-    record = KYCVerification.objects.create(
-        user=user,
-        verification_type=KYCVerification.VerificationType.BVN,
-        status=KYCVerification.Status.PENDING,
-        id_hash=id_hash,
-        masked_id=masked_id,
-    )
+    record, created = _prepare_kyc_verification(user, KYCVerification.VerificationType.BVN, bvn, request)
+    if not created:
+        return record
     audit("kyc.bvn_submitted", "pending", user, record.id, request)
 
     try:
@@ -508,6 +521,18 @@ def submit_bvn_verification(user, bvn: str, request) -> KYCVerification:
         record.failure_reason = exc.code
         record.save(update_fields=["status", "failure_reason", "updated_at"])
         audit("kyc.bvn_result", f"provider_error:{exc.code}", user, record.id, request)
+        logger.warning("KYC BVN provider unavailable: %s", exc.code)
+        raise IdentityError(
+            "kyc_unavailable",
+            "Identity verification is temporarily unavailable. Please try again later.",
+            503,
+        ) from None
+    except Exception as exc:
+        record.status = KYCVerification.Status.FAILED
+        record.failure_reason = "provider_error"
+        record.save(update_fields=["status", "failure_reason", "updated_at"])
+        audit("kyc.bvn_result", "provider_error:unexpected", user, record.id, request)
+        logger.exception("Unexpected error during KYC BVN verification: %s", exc)
         raise IdentityError(
             "kyc_unavailable",
             "Identity verification is temporarily unavailable. Please try again later.",
@@ -546,7 +571,10 @@ def get_kyc_status(user) -> dict:
     )
     summary = {}
     for v_type in KYCVerification.VerificationType.values:
-        latest = next((v for v in verifications if v.verification_type == v_type), None)
+        typed = [v for v in verifications if v.verification_type == v_type]
+        latest = next((v for v in typed if v.status == KYCVerification.Status.VERIFIED), None)
+        if latest is None:
+            latest = next(iter(typed), None)
         summary[v_type] = {
             "status": latest.status if latest else "not_started",
             "masked_id": latest.masked_id if latest else None,

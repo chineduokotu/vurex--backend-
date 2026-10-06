@@ -18,4 +18,5 @@ urlpatterns = [
     path("me/kyc/status/", views.kyc_status, name="kyc-status"),
     path("me/kyc/verify-nin/", views.kyc_verify_nin, name="kyc-verify-nin"),
     path("me/kyc/verify-bvn/", views.kyc_verify_bvn, name="kyc-verify-bvn"),
+    path("webhooks/dojah/", views.dojah_webhook, name="dojah-webhook"),
 ]
